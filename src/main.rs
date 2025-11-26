@@ -1,16 +1,15 @@
 #![allow(dead_code)]
 #![allow(clippy::uninlined_format_args)]
 
-mod libman;
+mod library;
 mod metadata;
 mod playlists;
+mod utils;
 
-use std::path::PathBuf;
-
+use crate::library::Library;
 use clap::{Parser, Subcommand};
-use muman::recurse_dir;
-
-use crate::libman::Library;
+use rayon::prelude::*;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lyradd", version, about)]
@@ -26,6 +25,10 @@ struct Cli {
     /// Overwrite existing
     #[arg(short = 'f', long = "force", default_value_t = false)]
     overwrite: bool,
+
+    /// Number of concurrent downloads
+    #[arg(short = 'j', long = "jobs", default_value_t = 4)]
+    jobs: usize,
 
     #[command(subcommand)]
     command: Commands,
@@ -61,43 +64,37 @@ fn main() {
 
     match cli.command {
         Commands::Lyrics { music_dir } => {
-            let library = Library::get_library(music_dir, cli.recursive);
+            let library = Library::new(music_dir, cli.recursive);
 
-            for metadata in library.songs() {
-                match metadata.get_lyrics(cli.overwrite) {
-                    Ok(_) => println!(
-                        "Lyrics added for: {} - {}",
-                        metadata.artist.as_deref().unwrap_or("Unknown Artist"),
-                        metadata.title.as_deref().unwrap_or("Unknown Title")
-                    ),
-                    Err(_) => println!(
-                        "Failed to get lyrics for: {} - {}",
-                        metadata.artist.as_deref().unwrap_or("Unknown Artist"),
-                        metadata.title.as_deref().unwrap_or("Unknown Title")
-                    ),
-                }
-            }
+            // Create a custom thread pool with limited concurrency
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(cli.jobs)
+                .build()
+                .unwrap();
+
+            pool.install(|| {
+                library.songs().par_iter().for_each(|metadata| {
+                    if let Err(_) = metadata.get_lyrics(cli.overwrite) {
+                        // Failures handled internally
+                    }
+                });
+            });
         }
         Commands::Playlist {
             music_dir,
             csv_files,
             output_dir,
         } => {
-            // Get all the songs from the lib
-            let library = Library::get_library(music_dir, cli.recursive);
-
-            // Iter the path and get all the playlist from the directory
+            let library = Library::new(music_dir, cli.recursive);
             let mut playlists_paths = Vec::new();
 
-            recurse_dir(&csv_files, &mut playlists_paths, cli.recursive);
+            utils::recurse_dir(&csv_files, &mut playlists_paths, cli.recursive);
 
-            // Turn each playlist path into a Playlist struct
             let playlists: Vec<playlists::Playlist> = playlists_paths
                 .into_iter()
                 .map(playlists::Playlist::new)
                 .collect();
 
-            // For each playlist, filter and complete the songs from the library
             let playlists: Vec<playlists::Playlist> = playlists
                 .into_iter()
                 .map(|mut pl| {
@@ -106,7 +103,6 @@ fn main() {
                 })
                 .collect();
 
-            // For each playlist, create an M3U file in the output directory
             for playlist in playlists {
                 playlist.save_to_m3u(&output_dir);
             }

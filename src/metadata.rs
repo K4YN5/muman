@@ -1,41 +1,38 @@
 use crate::playlists::BasicTrackInfo;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct SongMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
-    album: Option<String>,
-    isrc: Option<String>,
-
-    pub file_path: Option<String>,
+    pub album: Option<String>,
+    pub isrc: Option<String>,
+    pub file_path: Option<PathBuf>,
 }
-// Implement from and to for files path
-impl From<&std::path::PathBuf> for SongMetadata {
-    fn from(path: &std::path::PathBuf) -> Self {
+
+impl From<&PathBuf> for SongMetadata {
+    fn from(path: &PathBuf) -> Self {
         let mut metadata = SongMetadata {
             title: None,
             artist: None,
             album: None,
             isrc: None,
-            file_path: Some(path.to_string_lossy().to_string()),
+            file_path: Some(path.clone()),
         };
         metadata.fill();
-
         metadata
     }
 }
 
 impl From<BasicTrackInfo> for SongMetadata {
     fn from(value: BasicTrackInfo) -> Self {
-        let metadata = SongMetadata {
+        SongMetadata {
             title: Some(value.track_name),
             artist: Some(value.artist_names),
             album: Some(value.album_name),
             isrc: None,
             file_path: None,
-        };
-
-        metadata
+        }
     }
 }
 
@@ -58,10 +55,7 @@ impl SongMetadata {
     pub fn get_lyrics(&self, overwrite: bool) -> Result<(), ()> {
         let url = match self.request_lyrics_url() {
             Some(u) => u,
-            None => {
-                println!("Insufficient metadata to request lyrics");
-                return Err(());
-            }
+            None => return Err(()),
         };
 
         let response = ureq::get(&url).call();
@@ -69,7 +63,6 @@ impl SongMetadata {
         match response {
             Ok(resp) => {
                 if resp.status() != 200 {
-                    println!("No lyrics found for the song");
                     return Err(());
                 }
 
@@ -78,46 +71,41 @@ impl SongMetadata {
 
                 let lyrics = match self.lyrics_from_response(&json) {
                     Some(lyr) => lyr,
-                    None => {
-                        println!("No lyrics found in the response");
-                        return Err(());
-                    }
+                    None => return Err(()),
                 };
 
                 match self.save_lyrics(&lyrics, overwrite) {
                     Ok(_) => {
                         println!(
-                            "Saved lyrics for {:?}",
-                            self.title.as_deref().unwrap_or("Unknown Title")
+                            "Lyrics added: {}",
+                            self.title.as_deref().unwrap_or("Unknown")
                         );
                         Ok(())
                     }
-                    Err(e) => {
-                        eprintln!("Error saving lyrics: {}", e);
-                        Err(())
-                    }
+                    Err(_) => Err(()),
                 }
             }
-            Err(e) => {
-                eprintln!("Error fetching lyrics: {}", e);
-                Err(())
-            }
+            Err(_) => Err(()),
         }
     }
 
-    fn is_complete(&self) -> bool {
-        self.title.is_some() && self.artist.is_some() && self.album.is_some() && self.isrc.is_some()
-    }
-
     fn request_lyrics_url(&self) -> Option<String> {
-        if !self.is_complete() {
+        if self.title.is_none() || self.artist.is_none() {
             return None;
         }
 
         let title = urlencoding::encode(self.title.as_deref().unwrap());
         let artist = urlencoding::encode(self.artist.as_deref().unwrap());
-        let album = urlencoding::encode(self.album.as_deref().unwrap());
-        let isrc = urlencoding::encode(self.isrc.as_deref().unwrap());
+        let album = self
+            .album
+            .as_deref()
+            .map(urlencoding::encode)
+            .unwrap_or_default();
+        let isrc = self
+            .isrc
+            .as_deref()
+            .map(urlencoding::encode)
+            .unwrap_or_default();
 
         Some(format!(
             "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&isrc={}",
@@ -127,7 +115,7 @@ impl SongMetadata {
 
     fn save_lyrics(&self, lyrics: &str, overwrite: bool) -> std::io::Result<()> {
         if let Some(ref path) = self.file_path {
-            let mut lyrics_path = std::path::PathBuf::from(path);
+            let mut lyrics_path = path.clone();
             lyrics_path.set_extension("lrc");
 
             if lyrics_path.exists() && !overwrite {
@@ -140,64 +128,45 @@ impl SongMetadata {
     }
 
     fn lyrics_from_response(&self, response: &serde_json::Value) -> Option<String> {
-        if let Some(synced_lyrics) = response.get("syncedLyrics")
-            && !synced_lyrics.is_null()
-        {
-            return Some(
-                self.improve_lyrics_format(synced_lyrics.as_str().unwrap().to_string().as_str()),
-            );
+        if let Some(synced_lyrics) = response.get("syncedLyrics").and_then(|v| v.as_str()) {
+            return Some(self.improve_lyrics_format(synced_lyrics));
         }
 
-        if let Some(unsynced_lyrics) = response.get("plainLyrics") {
-            return Some(
-                self.improve_lyrics_format(unsynced_lyrics.as_str().unwrap().to_string().as_str()),
-            );
+        if let Some(unsynced_lyrics) = response.get("plainLyrics").and_then(|v| v.as_str()) {
+            return Some(self.improve_lyrics_format(unsynced_lyrics));
         }
 
         None
     }
 
     fn improve_lyrics_format(&self, lyrics: &str) -> String {
-        let mut improved_lyrics = String::new();
+        let mut improved = String::new();
         if let Some(ref title) = self.title {
-            improved_lyrics.push_str(&format!("[ti:{}]\n", title));
+            improved.push_str(&format!("[ti:{}]\n", title));
         }
         if let Some(ref artist) = self.artist {
-            improved_lyrics.push_str(&format!("[ar:{}]\n", artist));
+            improved.push_str(&format!("[ar:{}]\n", artist));
         }
-        improved_lyrics.push_str(lyrics);
-        improved_lyrics
+        improved.push_str(lyrics);
+        improved
     }
-    /// Checks if two songs are the same using fuzzy matching
-    pub fn matches_metadata(&self, other: &SongMetadata) -> bool {
-        let self_title = self.normalize_str(&self.title);
-        let other_title = self.normalize_str(&other.title);
-        println!("Comparing titles: '{}' vs '{}'", self_title, other_title);
 
-        let self_artist = self.normalize_str(&self.artist);
+    pub fn matches_metadata(&self, other: &SongMetadata) -> bool {
+        let self_artist = SongMetadata::normalize_str(&self.artist);
         let other_artists: Vec<String> = other
             .artist
             .as_ref()
             .map(|s| {
                 s.split(';')
-                    .map(|s| s.trim().to_lowercase())
-                    .collect::<Vec<String>>()
+                    .map(|sub| SongMetadata::normalize_str(&Some(sub.to_string())))
+                    .collect()
             })
             .unwrap_or_default();
 
-        if self_title != other_title {
-            return false;
-        }
-
-        // Check if any of the other artists match self artist
         if !self_artist.is_empty() && !other_artists.is_empty() {
             for other_artist in other_artists {
-                if !self_artist.is_empty() && !other_artist.is_empty() {
-                    if self_artist != other_artist {
-                        println!("Comparing artists: '{}' vs '{}'", self_artist, other_artist);
-                        println!("Titles match though: '{}' vs '{}'", self_title, other_title);
-                    }
-                    return self_artist == other_artist;
+                if !other_artist.is_empty() && self_artist == other_artist {
+                    return true;
                 }
             }
             return false;
@@ -206,14 +175,12 @@ impl SongMetadata {
         true
     }
 
-    /// Helper to lowercase and remove punctuation for better matching
-    /// e.g. "Beggin'" -> "beggin"
-    fn normalize_str(&self, input: &Option<String>) -> String {
+    pub fn normalize_str(input: &Option<String>) -> String {
         match input {
             Some(s) => s
                 .to_lowercase()
                 .chars()
-                .filter(|c| c.is_alphanumeric() || c.is_whitespace()) // Remove punctuation like ' or -
+                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
                 .collect::<String>()
                 .trim()
                 .to_string(),
