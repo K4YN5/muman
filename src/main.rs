@@ -112,6 +112,14 @@ fn main() {
                 }
             }
 
+            let mut missing_artists = HashMap::new();
+
+            for song in missing_songs.keys() {
+                if let Some(artist) = &song.artist {
+                    *missing_artists.entry(artist.clone()).or_insert(0) += 1;
+                }
+            }
+
             // Print summary of missing songs sorted by frequency in a log file
             if !missing_songs.is_empty() {
                 let mut missing_songs_vec: Vec<(&SongMetadata, &usize)> =
@@ -132,6 +140,38 @@ fn main() {
                     )
                     .unwrap();
                 }
+                writeln!(
+                    log_file,
+                    "\nTotal unique missing songs: {}",
+                    missing_songs.len()
+                )
+                .unwrap();
+            }
+
+            if !missing_artists.is_empty() {
+                let mut missing_artists_vec: Vec<(&String, &usize)> =
+                    missing_artists.iter().collect();
+
+                missing_artists_vec.sort_by(|a, b| b.1.cmp(a.1));
+
+                let log_path = output_dir.join("missing_artists.log");
+                let mut log_file = std::fs::File::create(&log_path).unwrap();
+                use std::io::Write;
+                writeln!(log_file, "Missing Artists Summary:").unwrap();
+                for (artist, count) in missing_artists_vec {
+                    writeln!(
+                        log_file,
+                        "{} - Missing songs in {} playlists",
+                        artist, count
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    log_file,
+                    "\nTotal unique missing artists: {}",
+                    missing_artists.len()
+                )
+                .unwrap();
             }
 
             for playlist in playlists {
