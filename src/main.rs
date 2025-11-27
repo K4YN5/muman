@@ -2,6 +2,7 @@
 
 mod dedup;
 mod library;
+mod lives;
 mod metadata;
 mod playlists;
 mod utils;
@@ -65,6 +66,9 @@ enum Commands {
         #[arg(short = 'c', long = "csv-dir", required = true)]
         csv_files: PathBuf,
     },
+
+    /// Identify and manage live albums in the library  
+    ManageLives {},
 }
 
 fn main() {
@@ -84,6 +88,9 @@ fn main() {
     debug!("Library initialized in {:.2?}", start.elapsed());
 
     match cli.command {
+        Commands::ManageLives {} => {
+            lives::run(&library, cli.dry_run);
+        }
         Commands::RemoveDupes {} => {
             dedup::run(&library, cli.dry_run, cli.hard_link);
         }
