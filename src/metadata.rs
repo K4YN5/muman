@@ -168,7 +168,7 @@ impl SongMetadata {
             .map(|s| {
                 s.split(';')
                     .map(|sub| SongMetadata::normalize_str(&Some(sub.to_string())))
-                    .collect()
+                    .collect::<Vec<String>>()
             })
             .unwrap_or_default();
 

@@ -30,6 +30,10 @@ struct Cli {
     #[arg(short = 'j', long = "jobs", default_value_t = 4)]
     jobs: usize,
 
+    /// Music directory
+    #[arg(value_name = "MUSIC_DIR", required = true)]
+    music_dir: PathBuf,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -37,18 +41,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Download lyrics for audio files
-    Lyrics {
-        /// Music directory/directories (operands, POSIX style)
-        #[arg(value_name = "MUSIC_DIR", required = true)]
-        music_dir: Vec<PathBuf>,
-    },
+    Lyrics {},
+
+    /// Test
+    Test {},
 
     /// Convert CSV playlist files to M3U format
     Playlist {
-        /// Music directory/directories (operands, POSIX style)
-        #[arg(value_name = "MUSIC_DIR", required = true)]
-        music_dir: Vec<PathBuf>,
-
         /// Output directory
         #[arg(short = 'o', long = "output", required = true)]
         output_dir: PathBuf,
@@ -62,10 +61,16 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Lyrics { music_dir } => {
-            let library = Library::new(music_dir, cli.recursive);
+    let start = std::time::Instant::now();
+    let library = Library::new(cli.music_dir, cli.recursive);
+    println!(
+        "Library initialized in {:.2?}",
+        std::time::Instant::now() - start
+    );
 
+    match cli.command {
+        Commands::Test {} => {}
+        Commands::Lyrics {} => {
             // Create a custom thread pool with limited concurrency
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(cli.jobs)
@@ -81,11 +86,9 @@ fn main() {
             });
         }
         Commands::Playlist {
-            music_dir,
             csv_files,
             output_dir,
         } => {
-            let library = Library::new(music_dir, cli.recursive);
             let mut playlists_paths = Vec::new();
 
             utils::recurse_dir(&csv_files, &mut playlists_paths, cli.recursive);
