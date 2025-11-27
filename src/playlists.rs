@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct Playlist {
     pub name: String,
     pub songs: Vec<SongMetadata>,
+    pub missing_songs: Vec<SongMetadata>,
 }
 
 impl Playlist {
@@ -31,6 +32,7 @@ impl Playlist {
                 .to_string_lossy()
                 .to_string(),
             songs,
+            missing_songs: Vec::new(),
         }
     }
 
@@ -60,21 +62,9 @@ impl Playlist {
         }
 
         if !missing_songs.is_empty() {
-            println!("---------------------------------------------------");
-            println!(
-                "⚠️  Could not find {} songs in your library:",
-                missing_songs.len()
-            );
-            for s in &missing_songs {
-                println!(
-                    "   ❌ {} - {}",
-                    s.artist.as_deref().unwrap_or("Unknown"),
-                    s.title.as_deref().unwrap_or("Unknown")
-                );
+            for song in &missing_songs {
+                self.missing_songs.push(song.to_owned().to_owned());
             }
-            println!("---------------------------------------------------");
-        } else {
-            println!("✅ All songs matched successfully!");
         }
 
         self.songs = completed_songs;

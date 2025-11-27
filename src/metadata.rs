@@ -1,7 +1,7 @@
 use crate::playlists::BasicTrackInfo;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SongMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -21,6 +21,15 @@ impl From<&PathBuf> for SongMetadata {
         };
         metadata.fill();
         metadata
+    }
+}
+
+// Impl conversion to and from string with title and artist separated by " - "
+impl From<&SongMetadata> for String {
+    fn from(value: &SongMetadata) -> Self {
+        let title = value.title.as_deref().unwrap_or("Unknown Title");
+        let artist = value.artist.as_deref().unwrap_or("Unknown Artist");
+        format!("{} - {}", artist, title)
     }
 }
 

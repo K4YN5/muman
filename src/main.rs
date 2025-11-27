@@ -6,10 +6,10 @@ mod metadata;
 mod playlists;
 mod utils;
 
-use crate::library::Library;
+use crate::{library::Library, metadata::SongMetadata};
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Parser)]
 #[command(name = "lyradd", version, about)]
@@ -102,6 +102,37 @@ fn main() {
                     pl
                 })
                 .collect();
+
+            // Aggregate missing songs across all playlists with a counter for each song
+            let mut missing_songs = HashMap::new();
+
+            for playlist in &playlists {
+                for song in &playlist.missing_songs {
+                    *missing_songs.entry(song.clone()).or_insert(0) += 1;
+                }
+            }
+
+            // Print summary of missing songs sorted by frequency in a log file
+            if !missing_songs.is_empty() {
+                let mut missing_songs_vec: Vec<(&SongMetadata, &usize)> =
+                    missing_songs.iter().collect();
+
+                missing_songs_vec.sort_by(|a, b| b.1.cmp(a.1));
+
+                let log_path = output_dir.join("missing_songs.log");
+                let mut log_file = std::fs::File::create(&log_path).unwrap();
+                use std::io::Write;
+                writeln!(log_file, "Missing Songs Summary:").unwrap();
+                for (song, count) in missing_songs_vec {
+                    writeln!(
+                        log_file,
+                        "{} - Missing in {} playlists",
+                        String::from(song),
+                        count
+                    )
+                    .unwrap();
+                }
+            }
 
             for playlist in playlists {
                 playlist.save_to_m3u(&output_dir);
