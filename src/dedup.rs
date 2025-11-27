@@ -1,16 +1,13 @@
 use crate::library::Library;
 use crate::metadata::SongMetadata;
-use log::{error, info, warn};
+use log::{error, info};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Orchestrates the deduplication process.
 pub fn run(library: &Library, dry_run: bool) {
     let all_songs = library.get_all_songs();
 
-    // 1. Build an Album Frequency Map
-    // We count how many times each "Album Name" appears in the entire library.
-    // If count > 1, it's a real album. If count == 1, it might be a single.
+    // 1. Build Album Counts (for Single vs Album heuristic)
     let mut album_counts: HashMap<String, usize> = HashMap::new();
     for song in &all_songs {
         if let Some(ref album) = song.album {
@@ -19,27 +16,90 @@ pub fn run(library: &Library, dry_run: bool) {
         }
     }
 
-    // 2. Group songs by (Title, Artist) for duplicate detection
-    let mut grouped: HashMap<(String, String), Vec<&SongMetadata>> = HashMap::new();
+    // 2. Group primarily by Title + Artist
+    let mut title_groups: HashMap<(String, String), Vec<&SongMetadata>> = HashMap::new();
     for song in &all_songs {
         let key = (
             SongMetadata::normalize_str(&song.title),
             SongMetadata::normalize_str(&song.artist),
         );
         if !key.0.is_empty() {
-            grouped.entry(key).or_default().push(song);
+            title_groups.entry(key).or_default().push(song);
         }
     }
 
-    for ((title, artist), dupes) in grouped.iter().filter(|(_, v)| v.len() > 1) {
-        info!(
-            "Found {} copies of: '{}' by '{}'",
-            dupes.len(),
-            title,
-            artist
-        );
-        process_duplicate_group(dupes, &album_counts, dry_run);
+    for ((title, artist), potential_dupes) in title_groups.iter().filter(|(_, v)| v.len() > 1) {
+        // 3. Sub-group by ISRC / Duration to avoid False Positives
+        let valid_groups = separate_distinct_recordings(potential_dupes);
+
+        for group in valid_groups {
+            if group.len() > 1 {
+                info!(
+                    "Found {} true duplicates for: '{}' by '{}'",
+                    group.len(),
+                    title,
+                    artist
+                );
+                process_duplicate_group(&group, &album_counts, dry_run);
+            }
+        }
     }
+}
+
+/// The core safety logic. splits a list of "Same Title" songs into
+/// lists of "Actually the Same Audio" songs.
+fn separate_distinct_recordings<'a>(songs: &[&'a SongMetadata]) -> Vec<Vec<&'a SongMetadata>> {
+    let mut distinct_groups: Vec<Vec<&SongMetadata>> = Vec::new();
+
+    for song in songs {
+        let mut found_group = false;
+
+        for group in &mut distinct_groups {
+            let representative = group[0];
+
+            if are_songs_identical(song, representative) {
+                group.push(song);
+                found_group = true;
+                break;
+            }
+        }
+
+        if !found_group {
+            distinct_groups.push(vec![song]);
+        }
+    }
+
+    distinct_groups
+}
+
+fn are_songs_identical(a: &SongMetadata, b: &SongMetadata) -> bool {
+    // 1. CHECK ISRC (The Gold Standard)
+    if let (Some(isrc_a), Some(isrc_b)) = (&a.isrc, &b.isrc) {
+        // If ISRCs exist and differ, they are DIFFERENT recordings.
+        if isrc_a != isrc_b {
+            return false;
+        }
+        // If ISRCs match, they are the same.
+        return true;
+    }
+
+    // 2. CHECK DURATION (The Fallback)
+    // Only calculated if ISRC is missing on one or both.
+    let dur_a = a.get_duration();
+    let dur_b = b.get_duration();
+
+    // If we fail to read duration (0), assume they are different to be safe.
+    if dur_a == 0 || dur_b == 0 {
+        return false;
+    }
+
+    // Tolerance of 3 seconds for silence padding differences
+    if dur_a.abs_diff(dur_b) > 3 {
+        return false;
+    }
+
+    // If duration matches (and no conflicting ISRC), assume Duplicate.
+    true
 }
 
 fn process_duplicate_group(
@@ -49,10 +109,6 @@ fn process_duplicate_group(
 ) {
     let mut candidates = dupes.to_vec();
 
-    // SORTING STRATEGY:
-    // 1. Quality Score (Album Track > Single > Broken Metadata)
-    // 2. ISRC Presence
-    // 3. File Path (Tie-breaker)
     candidates.sort_by(|a, b| {
         let score_a = get_quality_score(a, album_counts);
         let score_b = get_quality_score(b, album_counts);
@@ -62,7 +118,21 @@ fn process_duplicate_group(
                 let a_has_isrc = a.isrc.is_some();
                 let b_has_isrc = b.isrc.is_some();
                 match b_has_isrc.cmp(&a_has_isrc) {
-                    std::cmp::Ordering::Equal => a.file_path.cmp(&b.file_path),
+                    // Tie-breaker: Shortest Path length usually implies "Original Album"
+                    // vs "Super Long Compilation Name"
+                    std::cmp::Ordering::Equal => {
+                        let path_a_len = a
+                            .file_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().len())
+                            .unwrap_or(usize::MAX);
+                        let path_b_len = b
+                            .file_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().len())
+                            .unwrap_or(usize::MAX);
+                        path_a_len.cmp(&path_b_len)
+                    }
                     other => other,
                 }
             }
@@ -71,44 +141,63 @@ fn process_duplicate_group(
     });
 
     if let Some(winner) = candidates.first() {
+        // Logging for user confidence
+        let winner_album = winner.album.as_deref().unwrap_or("Unknown");
+        let winner_filename = winner
+            .file_path
+            .as_ref()
+            .map(|p| p.file_name().unwrap_or_default())
+            .unwrap_or_default();
+
         info!(
             "  KEEPING: {:?} (Album: {:?})",
-            winner
-                .file_path
-                .as_ref()
-                .map(|p| p.file_name().unwrap_or_default()),
-            winner.album.as_deref().unwrap_or("Unknown")
+            winner_filename, winner_album
         );
 
         for loser in &candidates[1..] {
             remove_song_file(loser, dry_run);
         }
-    } else {
-        warn!("Duplicate group processed but found no candidates.");
     }
 }
 
-/// Calculus to determine the "value" of a track version.
-/// 3 = Album Track (Belongs to an album with multiple songs OR Album Name != Title)
-/// 2 = Single (Album Name == Title AND no other songs in that album)
-/// 1 = Poor Metadata (Missing Album)
-fn get_quality_score(song: &SongMetadata, album_counts: &HashMap<String, usize>) -> u8 {
-    match (&song.album, &song.title) {
-        (Some(album), Some(title)) => {
-            let norm_album = SongMetadata::normalize_str(&Some(album.clone()));
-            let norm_title = SongMetadata::normalize_str(&Some(title.clone()));
+fn get_quality_score(song: &SongMetadata, album_counts: &HashMap<String, usize>) -> i32 {
+    let mut score = 0;
 
-            // Check if this album exists elsewhere in the library
-            let is_multi_track_album = *album_counts.get(&norm_album).unwrap_or(&0) > 1;
+    if let (Some(album), Some(title)) = (&song.album, &song.title) {
+        let norm_album = SongMetadata::normalize_str(&Some(album.clone()));
+        let norm_title = SongMetadata::normalize_str(&Some(title.clone()));
 
-            if norm_album == norm_title && !is_multi_track_album {
-                2 // It is a Single (Title matches Album, and it's the only one)
-            } else {
-                3 // It is an Album Track (Title != Album OR it's a Title Track of a full album)
-            }
+        let is_multi_track_album = *album_counts.get(&norm_album).unwrap_or(&0) > 1;
+
+        // Base Score: Album Track > Single
+        if norm_album == norm_title && !is_multi_track_album {
+            score += 2; // Single
+        } else {
+            score += 5; // Album Track
         }
-        _ => 1, // Metadata is missing
+
+        // HEURISTIC: Penalize Compilations / Radio Specials
+        // We want the original studio album to win.
+        let lower_album = album.to_lowercase();
+        if lower_album.contains("radio")
+            || lower_album.contains("special")
+            || lower_album.contains("greatest")
+            || lower_album.contains("best of")
+            || lower_album.contains("remix")
+        {
+            score -= 3;
+        }
+
+        // Bonus: Prefer "Deluxe" over standard if everything else matches,
+        // but not if it triggers the penalty above.
+        if lower_album.contains("deluxe") {
+            score += 1;
+        }
+    } else {
+        score = 0; // Poor metadata
     }
+
+    score
 }
 
 fn remove_song_file(song: &SongMetadata, dry_run: bool) {
@@ -117,7 +206,13 @@ fn remove_song_file(song: &SongMetadata, dry_run: bool) {
         None => return,
     };
 
-    info!("  REMOVING: {:?}", path);
+    // Extra safety logging
+    let album_name = song.album.as_deref().unwrap_or("Unknown");
+    info!(
+        "  REMOVING: {:?} (Album: {:?})",
+        path.file_name().unwrap_or_default(),
+        album_name
+    );
 
     if !dry_run {
         if let Err(e) = std::fs::remove_file(path) {
@@ -142,11 +237,7 @@ fn cleanup_empty_dir(dir_opt: Option<&Path>) {
             });
 
             if !has_other_files {
-                if let Err(_) = std::fs::remove_dir(parent_dir) {
-                    // Ignored
-                } else {
-                    info!("  CLEANED DIR: {:?}", parent_dir);
-                }
+                let _ = std::fs::remove_dir(parent_dir);
             }
         }
     }

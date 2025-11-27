@@ -174,4 +174,15 @@ impl SongMetadata {
             None => String::new(),
         }
     }
+
+    pub fn get_duration(&self) -> u64 {
+        if let Some(ref path) = self.file_path {
+            if let Ok(tagged_file) = lofty::read_from_path(path) {
+                use lofty::file::AudioFile;
+                let properties = tagged_file.properties();
+                return properties.duration().as_secs();
+            }
+        }
+        0
+    }
 }
