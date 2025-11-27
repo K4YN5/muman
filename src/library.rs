@@ -39,13 +39,6 @@ impl Library {
                 |mut acc: HashMap<(String, String), Vec<SongMetadata>>, (song, key)| {
                     let entry = acc.entry(key.clone()).or_insert_with(Vec::new);
 
-                    if !entry.is_empty() {
-                        println!(
-                            "Duplicate found: artist='{:?}', title='{:?}', file='{:?}'",
-                            song.artist, song.title, song.file_path
-                        );
-                    }
-
                     entry.push(song);
                     acc
                 },
@@ -61,6 +54,10 @@ impl Library {
             );
 
         println!("Library loaded with {} songs.", songs.len());
+        println!(
+            "Total unique song entries in library: {}",
+            songs.values().map(|v| v.len()).sum::<usize>()
+        );
 
         Library { songs }
     }
