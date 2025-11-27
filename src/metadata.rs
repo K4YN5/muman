@@ -1,4 +1,4 @@
-use crate::playlists::BasicTrackInfo;
+use crate::{playlists::BasicTrackInfo, utils::encode_url};
 use log::{debug, info, warn};
 use std::path::PathBuf;
 
@@ -111,18 +111,10 @@ impl SongMetadata {
             return None;
         }
 
-        let title = urlencoding::encode(self.title.as_deref().unwrap());
-        let artist = urlencoding::encode(self.artist.as_deref().unwrap());
-        let album = self
-            .album
-            .as_deref()
-            .map(urlencoding::encode)
-            .unwrap_or_default();
-        let isrc = self
-            .isrc
-            .as_deref()
-            .map(urlencoding::encode)
-            .unwrap_or_default();
+        let title = encode_url(self.title.as_deref().unwrap());
+        let artist = encode_url(self.artist.as_deref().unwrap());
+        let album = self.album.as_deref().map(encode_url).unwrap_or_default();
+        let isrc = self.isrc.as_deref().map(encode_url).unwrap_or_default();
 
         Some(format!(
             "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&isrc={}",

@@ -117,7 +117,7 @@ fn remove_song_file(song: &SongMetadata, dry_run: bool) {
         None => return,
     };
 
-    info!("  REMOVING: {:?}", path.file_name().unwrap_or_default());
+    info!("  REMOVING: {:?}", path);
 
     if !dry_run {
         if let Err(e) = std::fs::remove_file(path) {
