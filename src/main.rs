@@ -1,15 +1,16 @@
 #![allow(dead_code)]
-#![allow(clippy::uninlined_format_args)]
 
+mod dedup;
 mod library;
 mod metadata;
 mod playlists;
 mod utils;
 
-use crate::{library::Library, metadata::SongMetadata};
+use crate::library::Library;
 use clap::{Parser, Subcommand};
+use log::debug;
 use rayon::prelude::*;
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "lyradd", version, about)]
@@ -18,19 +19,23 @@ struct Cli {
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbosity: u8,
 
-    /// Recursive search
+    /// Recursive search in directories
     #[arg(short = 'r', long = "recursive", default_value_t = false)]
     recursive: bool,
 
-    /// Overwrite existing
+    /// Overwrite existing files
     #[arg(short = 'f', long = "force", default_value_t = false)]
     overwrite: bool,
 
-    /// Number of concurrent downloads
+    /// Concurrent download jobs
     #[arg(short = 'j', long = "jobs", default_value_t = 4)]
     jobs: usize,
 
-    /// Music directory
+    /// Dry run (no changes made)
+    #[arg(short = 'n', long = "dry-run", default_value_t = false)]
+    dry_run: bool,
+
+    /// Base music directory
     #[arg(value_name = "MUSIC_DIR", required = true)]
     music_dir: PathBuf,
 
@@ -43,16 +48,16 @@ enum Commands {
     /// Download lyrics for audio files
     Lyrics {},
 
-    /// Test
-    Test {},
+    /// Remove duplicate songs (prioritizes Albums over Singles)
+    RemoveDupes {},
 
     /// Convert CSV playlist files to M3U format
     Playlist {
-        /// Output directory
+        /// Directory where M3U files will be saved
         #[arg(short = 'o', long = "output", required = true)]
         output_dir: PathBuf,
 
-        /// CSV directory
+        /// Directory containing CSV playlist files
         #[arg(short = 'c', long = "csv-dir", required = true)]
         csv_files: PathBuf,
     },
@@ -61,26 +66,33 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
+    // Initialize Logger
+    let log_level = match cli.verbosity {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
+
     let start = std::time::Instant::now();
     let library = Library::new(cli.music_dir, cli.recursive);
-    println!(
-        "Library initialized in {:.2?}",
-        std::time::Instant::now() - start
-    );
+    debug!("Library initialized in {:.2?}", start.elapsed());
 
     match cli.command {
-        Commands::Test {} => {}
+        Commands::RemoveDupes {} => {
+            dedup::run(&library, cli.dry_run);
+        }
         Commands::Lyrics {} => {
-            // Create a custom thread pool with limited concurrency
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(cli.jobs)
                 .build()
                 .unwrap();
 
             pool.install(|| {
-                library.songs().par_iter().for_each(|metadata| {
+                library.get_all_songs().par_iter().for_each(|metadata| {
                     if let Err(_) = metadata.get_lyrics(cli.overwrite) {
-                        // Failures handled internally
+                        // Logged internally
                     }
                 });
             });
@@ -90,93 +102,23 @@ fn main() {
             output_dir,
         } => {
             let mut playlists_paths = Vec::new();
-
             utils::recurse_dir(&csv_files, &mut playlists_paths, cli.recursive);
 
-            let playlists: Vec<playlists::Playlist> = playlists_paths
+            // Parse Playlists
+            let mut playlists: Vec<playlists::Playlist> = playlists_paths
                 .into_iter()
                 .map(playlists::Playlist::new)
                 .collect();
 
-            let playlists: Vec<playlists::Playlist> = playlists
-                .into_iter()
-                .map(|mut pl| {
-                    pl.filter_and_complete_from_library(&library);
-                    pl
-                })
-                .collect();
-
-            // Aggregate missing songs across all playlists with a counter for each song
-            let mut missing_songs = HashMap::new();
-
-            for playlist in &playlists {
-                for song in &playlist.missing_songs {
-                    *missing_songs.entry(song.clone()).or_insert(0) += 1;
-                }
+            // Match against library
+            for pl in &mut playlists {
+                pl.filter_and_complete_from_library(&library);
             }
 
-            let mut missing_artists = HashMap::new();
+            // Generate Reports
+            playlists::generate_missing_report(&playlists, &output_dir);
 
-            for song in missing_songs.keys() {
-                if let Some(artist) = &song.artist {
-                    *missing_artists.entry(artist.clone()).or_insert(0) += 1;
-                }
-            }
-
-            // Print summary of missing songs sorted by frequency in a log file
-            if !missing_songs.is_empty() {
-                let mut missing_songs_vec: Vec<(&SongMetadata, &usize)> =
-                    missing_songs.iter().collect();
-
-                missing_songs_vec.sort_by(|a, b| b.1.cmp(a.1));
-
-                let log_path = output_dir.join("missing_songs.log");
-                let mut log_file = std::fs::File::create(&log_path).unwrap();
-                use std::io::Write;
-                writeln!(log_file, "Missing Songs Summary:").unwrap();
-                for (song, count) in missing_songs_vec {
-                    writeln!(
-                        log_file,
-                        "{} - Missing in {} playlists",
-                        String::from(song),
-                        count
-                    )
-                    .unwrap();
-                }
-                writeln!(
-                    log_file,
-                    "\nTotal unique missing songs: {}",
-                    missing_songs.len()
-                )
-                .unwrap();
-            }
-
-            if !missing_artists.is_empty() {
-                let mut missing_artists_vec: Vec<(&String, &usize)> =
-                    missing_artists.iter().collect();
-
-                missing_artists_vec.sort_by(|a, b| b.1.cmp(a.1));
-
-                let log_path = output_dir.join("missing_artists.log");
-                let mut log_file = std::fs::File::create(&log_path).unwrap();
-                use std::io::Write;
-                writeln!(log_file, "Missing Artists Summary:").unwrap();
-                for (artist, count) in missing_artists_vec {
-                    writeln!(
-                        log_file,
-                        "{} - Missing songs in {} playlists",
-                        artist, count
-                    )
-                    .unwrap();
-                }
-                writeln!(
-                    log_file,
-                    "\nTotal unique missing artists: {}",
-                    missing_artists.len()
-                )
-                .unwrap();
-            }
-
+            // Save M3Us
             for playlist in playlists {
                 playlist.save_to_m3u(&output_dir);
             }

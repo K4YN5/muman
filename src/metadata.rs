@@ -1,6 +1,8 @@
 use crate::playlists::BasicTrackInfo;
+use log::{debug, info, warn};
 use std::path::PathBuf;
 
+/// Represents the metadata of a single audio file.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SongMetadata {
     pub title: Option<String>,
@@ -24,7 +26,6 @@ impl From<&PathBuf> for SongMetadata {
     }
 }
 
-// Impl conversion to and from string with title and artist separated by " - "
 impl From<&SongMetadata> for String {
     fn from(value: &SongMetadata) -> Self {
         let title = value.title.as_deref().unwrap_or("Unknown Title");
@@ -46,25 +47,32 @@ impl From<BasicTrackInfo> for SongMetadata {
 }
 
 impl SongMetadata {
+    /// Reads tags from the file path if it exists.
     pub fn fill(&mut self) {
-        if let Some(ref path) = self.file_path {
-            if let Ok(tagged_file) = lofty::read_from_path(path) {
-                if let Some(tag) = lofty::file::TaggedFileExt::primary_tag(&tagged_file) {
-                    self.title = lofty::tag::Accessor::title(tag).map(|s| s.to_string());
-                    self.artist = lofty::tag::Accessor::artist(tag).map(|s| s.to_string());
-                    self.album = lofty::tag::Accessor::album(tag).map(|s| s.to_string());
-                    self.isrc = tag
-                        .get_string(&lofty::tag::ItemKey::Isrc)
-                        .map(|s| s.to_string());
-                }
-            }
+        if let Some(ref path) = self.file_path
+            && let Ok(tagged_file) = lofty::read_from_path(path)
+            && let Some(tag) = lofty::file::TaggedFileExt::primary_tag(&tagged_file)
+        {
+            self.title = lofty::tag::Accessor::title(tag).map(|s| s.to_string());
+            self.artist = lofty::tag::Accessor::artist(tag).map(|s| s.to_string());
+            self.album = lofty::tag::Accessor::album(tag).map(|s| s.to_string());
+            self.isrc = tag
+                .get_string(&lofty::tag::ItemKey::Isrc)
+                .map(|s| s.to_string());
         }
     }
 
+    /// Fetches lyrics from the API and saves them to a .lrc file.
     pub fn get_lyrics(&self, overwrite: bool) -> Result<(), ()> {
         let url = match self.request_lyrics_url() {
             Some(u) => u,
-            None => return Err(()),
+            None => {
+                debug!(
+                    "Skipping lyrics: Insufficient metadata for {:?}",
+                    self.title
+                );
+                return Err(());
+            }
         };
 
         let response = ureq::get(&url).call();
@@ -85,16 +93,16 @@ impl SongMetadata {
 
                 match self.save_lyrics(&lyrics, overwrite) {
                     Ok(_) => {
-                        println!(
-                            "Lyrics added: {}",
-                            self.title.as_deref().unwrap_or("Unknown")
-                        );
+                        info!("Lyrics added: {}", String::from(self));
                         Ok(())
                     }
                     Err(_) => Err(()),
                 }
             }
-            Err(_) => Err(()),
+            Err(e) => {
+                warn!("API request failed for {}: {}", String::from(self), e);
+                Err(())
+            }
         }
     }
 
@@ -128,6 +136,7 @@ impl SongMetadata {
             lyrics_path.set_extension("lrc");
 
             if lyrics_path.exists() && !overwrite {
+                debug!("Lyrics already exist for {:?}", path);
                 return Ok(());
             }
 
@@ -160,30 +169,7 @@ impl SongMetadata {
         improved
     }
 
-    pub fn matches_metadata(&self, other: &SongMetadata) -> bool {
-        let self_artist = SongMetadata::normalize_str(&self.artist);
-        let other_artists: Vec<String> = other
-            .artist
-            .as_ref()
-            .map(|s| {
-                s.split(';')
-                    .map(|sub| SongMetadata::normalize_str(&Some(sub.to_string())))
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default();
-
-        if !self_artist.is_empty() && !other_artists.is_empty() {
-            for other_artist in other_artists {
-                if !other_artist.is_empty() && self_artist == other_artist {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        true
-    }
-
+    /// Normalizes a string for fuzzy comparison (lowercase, alphanumeric only).
     pub fn normalize_str(input: &Option<String>) -> String {
         match input {
             Some(s) => s

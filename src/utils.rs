@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+/// Recursively traverses a directory and collects all files into the provided vector.
 pub fn recurse_dir(path: &Path, files: &mut Vec<PathBuf>, recursive: bool) {
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
