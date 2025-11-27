@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short = 'n', long = "dry-run", default_value_t = false)]
     dry_run: bool,
 
+    /// Use hard links for duplicate songs instead of keeping two copies (Saves space, but merges file tags)
+    #[arg(long = "hard-link", default_value_t = false)]
+    hard_link: bool,
+
     /// Base music directory
     #[arg(value_name = "MUSIC_DIR", required = true)]
     music_dir: PathBuf,
@@ -81,7 +85,7 @@ fn main() {
 
     match cli.command {
         Commands::RemoveDupes {} => {
-            dedup::run(&library, cli.dry_run);
+            dedup::run(&library, cli.dry_run, cli.hard_link);
         }
         Commands::Lyrics {} => {
             let pool = rayon::ThreadPoolBuilder::new()
